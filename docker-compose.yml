@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # 1. The Message Broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2. The API Server
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile.backend # (See note below)
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # 3. The Background Agent Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: celery -A app.celery_worker.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # 4. The React UI
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
