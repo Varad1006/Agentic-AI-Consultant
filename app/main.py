@@ -9,6 +9,7 @@ import io
 from pypdf import PdfReader
 import docx
 from app.vector_store import ingest_document_to_chroma
+from app.chat_agent import ask_consultant, ChatRequest
 
 app = FastAPI(title="Agentic AI Consultant API")
 
@@ -174,4 +175,21 @@ async def get_formatted_report(job_id: str):
         "job_id": job_id,
         "format": "markdown",
         "content": markdown_content
+    }
+# ... existing routes ...
+
+@app.post("/api/v1/consult/{job_id}/chat")
+async def chat_with_agent(job_id: str, request: ChatRequest):
+    """Allows the user to ask custom questions against their uploaded documents."""
+    
+    # Check if the job exists (optional, depending on your DB setup)
+    if not job_id:
+        raise HTTPException(status_code=400, detail="Invalid Job ID")
+        
+    answer = ask_consultant(job_id, request.question)
+    
+    return {
+        "job_id": job_id,
+        "question": request.question,
+        "answer": answer
     }
