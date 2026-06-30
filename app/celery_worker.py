@@ -75,6 +75,23 @@ workflow.add_edge("report_generator", END)
 
 app_graph = workflow.compile()
 logger.info("✅ LangGraph workflow compiled successfully")
+# 1. Linear Start
+workflow.set_entry_point("planner")
+workflow.add_edge("planner", "analyst")
+
+# 2. THE FAN-OUT (Parallel Execution)
+# Both agents start simultaneously the moment the Analyst finishes
+workflow.add_edge("analyst", "architect")
+workflow.add_edge("analyst", "roi_calculator")
+
+# 3. THE FAN-IN (Synchronization)
+# The Report Generator waits for BOTH parallel nodes to finish before starting
+workflow.add_edge(["architect", "roi_calculator"], "report_generator")
+
+# 4. Finish
+workflow.add_edge("report_generator", END)
+
+app_graph = workflow.compile()
 
 # ============================================================================
 # 2. CONFIGURE CELERY

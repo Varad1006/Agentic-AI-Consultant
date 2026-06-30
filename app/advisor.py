@@ -19,6 +19,7 @@ def answer_question(job_id: str, question: str):
     if task.state != "SUCCESS":
         return "The consulting report is still being generated. Please wait until the process is complete."
     consulting_memory = task.result
+    consulting_memory = load_consulting_memory(job_id)
 
     if consulting_memory is None:
         return (

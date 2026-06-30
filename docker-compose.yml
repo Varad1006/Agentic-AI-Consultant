@@ -8,7 +8,11 @@ services:
     ports:
       - "6379:6379"
 
+<<<<<<< HEAD
   # 2. FastAPI
+=======
+  # 2. The FastAPI Server
+>>>>>>> 729d179bf0c6e512af26524e79b8a5fd8849d7df
   api:
     build:
       context: .
@@ -19,18 +23,28 @@ services:
       - .env
     depends_on:
       - redis
+<<<<<<< HEAD
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./chroma_db:/app/chroma_db
       - ./app/storage:/app/app/storage
 
   # 3. Celery Worker
+=======
+    # The command to start FastAPI (bound to 0.0.0.0 so it can communicate outside the container)
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./chroma_db:/app/chroma_db # Saves your vector database to your hard drive so it isn't deleted on restart
+
+  # 3. The AI Engine
+>>>>>>> 729d179bf0c6e512af26524e79b8a5fd8849d7df
   worker:
     build:
       context: .
       dockerfile: Dockerfile
     env_file:
       - .env
+<<<<<<< HEAD
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_BACKEND_URL: redis://redis:6379/1
@@ -42,11 +56,25 @@ services:
       - ./app/storage:/app/app/storage
 
   # 4. React Frontend
+=======
+    depends_on:
+      - redis
+    # The command to start Celery
+    command: celery -A app.celery_worker.celery_app worker --loglevel=info --pool=solo
+    volumes:
+      - ./chroma_db:/app/chroma_db
+
+  # 4. The User Interface
+>>>>>>> 729d179bf0c6e512af26524e79b8a5fd8849d7df
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
+<<<<<<< HEAD
       - "3001:5173"
+=======
+      - "5173:5173"
+>>>>>>> 729d179bf0c6e512af26524e79b8a5fd8849d7df
     depends_on:
       - api
