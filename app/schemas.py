@@ -34,3 +34,17 @@ class ROIMetrics(BaseModel):
 
 class FinalReportCompilation(BaseModel):
     executive_summary: str = Field(description="A high-level corporate summary combining the business overview, core critical pain points, and why the proposed automation blueprint is a strategic necessity.")
+
+# Create a unified schema for a single agent to output
+class ArchitectAndROIMetrics(BaseModel):
+    # Architecture fields
+    overall_strategy: str 
+    proposed_solutions: List[ProposedSolution] 
+    infrastructure_requirements: List[str] 
+    
+    # ROI fields calculated at the exact same time
+    estimated_development_cost_usd: float 
+    annual_hours_saved: float 
+    estimated_annual_monetary_savings_usd: float 
+    payback_period_months: float 
+    roi_percentage: float

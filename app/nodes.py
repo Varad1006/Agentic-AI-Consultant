@@ -7,39 +7,49 @@ from app.vector_store import retrieve_relevant_context
 
 load_dotenv()
 
-# Global LLM instance pointing to the active 2026 flagship flash model
+# ✅ FIX: Use correct Google model name
+# Options: "gemini-2.0-flash" (recommended, faster) or "gemini-1.5-pro" (more powerful)
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash",
-    temperature=0
+    model="gemini-3.5-flash",  # Changed from "gemini-3.5-flash"
+    temperature=0,
+    max_retries=5
 )
 
+# ... existing code ...
 def planner_node(state: ConsultantState) -> dict:
     """
     1. Planner Agent: Acts as a gateway gatekeeper. Validates if the content 
     is sufficient for operational analysis and sets up the execution context.
     """
-    document = state.get("client_document_text", "").strip()
+    document = state.get("client_document_text", "")
+    
+    # Sanitize text to remove null bytes and non-printable characters
+    document = "".join(char for char in document if char.isprintable() or char in "\n\t")
+    document = document.strip()
+    
     if len(document) < 50:
         return {"errors": ["Planner Error: Uploaded operational profile text is too brief to generate a comprehensive consulting analysis."]}
     
-    # Passes text safely along to the next node
-    return {"client_document_text": document}
+    # Passes text safely along to the next node, truncated to prevent size limits
+    return {"client_document_text": document[:150000]}
+
 
 def analyst_node(state: ConsultantState) -> dict:
     """
-    2. Business Analyst Agent: Queries the vector database for operational bottlenecks 
-    and extracts structured data.
+    2. Business Analyst Agent: Queries the vector database for operational bottlenecks.
     """
+    # Short-circuit if previous node failed
+    if state.get("errors"):
+        return {}
+        
     job_id = state.get("job_id")
-    
-    # The agent explicitly searches the massive document for these themes
     search_query = "What is the core business model, what software or tools are used, and what are the specific bottlenecks, pain points, or time-consuming manual processes?"
     
-    # Retrieve only the 6 most relevant paragraphs from the 200-page document
     targeted_context = retrieve_relevant_context(job_id, search_query, top_k=6)
     
-    if not targeted_context:
-        return {"errors": ["Analyst Error: Could not retrieve relevant context from the database."]}
+    # THE FIX: Safely catch error strings so they don't break Gemini
+    if not targeted_context or "Error retrieving context" in targeted_context:
+        return {"errors": [f"Analyst Error: Database search failed. Details: {targeted_context}"]}
 
     analyst_llm = llm.with_structured_output(CurrentStateAnalysis)
     

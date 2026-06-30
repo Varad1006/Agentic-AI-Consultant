@@ -1,54 +1,52 @@
-version: '3.8'
+version: "3.8"
 
 services:
-  # 1. The Message Broker
+
+  # 1. Redis
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     ports:
       - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
 
-  # 2. The API Server
-  backend:
-    build: 
+  # 2. FastAPI
+  api:
+    build:
       context: .
-      dockerfile: Dockerfile.backend # (See note below)
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./chroma_db:/app/chroma_db
+      - ./app/storage:/app/app/storage
 
-  # 3. The Background Agent Worker
+  # 3. Celery Worker
   worker:
     build:
       context: .
-      dockerfile: Dockerfile.backend
-    command: celery -A app.celery_worker.celery_app worker --loglevel=info
+      dockerfile: Dockerfile
     env_file:
       - .env
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_BACKEND_URL: redis://redis:6379/1
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
+    command: celery -A app.celery_worker.celery_app worker --loglevel=info --pool=solo
+    volumes:
+      - ./chroma_db:/app/chroma_db
+      - ./app/storage:/app/app/storage
 
-  # 4. The React UI
+  # 4. React Frontend
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "80:80"
+      - "3001:5173"
     depends_on:
-      - backend
+      - api
