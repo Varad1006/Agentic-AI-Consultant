@@ -1,102 +1,48 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
+"""Follow-up chat with the consultant, grounded in the finished report and the source document."""
 
+import json
+import logging
+from typing import Any, Dict
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from app import vector_store
+from app.llm import get_chat_model
 from app.prompts import CONSULTANT_SYSTEM_PROMPT
-from app.consultant_memory import load_consulting_memory
-from app.vector_store import retrieve_relevant_context
-from celery.result import AsyncResult
-from app.celery_worker import celery_app
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash",
-    temperature=0.2
-)
+logger = logging.getLogger(__name__)
+
+HISTORY_MESSAGES = 6
+HISTORY_MESSAGE_CHARS = 1500
+EVIDENCE_CHUNKS = 3
 
 
-def answer_question(job_id: str, question: str):
+def answer_question(job: Dict[str, Any], question: str) -> str:
+    engagement = json.dumps(job["result"], separators=(",", ":"), ensure_ascii=False)
+    messages = [SystemMessage(content=CONSULTANT_SYSTEM_PROMPT.format(engagement=engagement))]
 
-    # Load previous consulting engagement
-    task = AsyncResult(job_id, app=celery_app)
-    if task.state != "SUCCESS":
-        return "The consulting report is still being generated. Please wait until the process is complete."
-    consulting_memory = task.result
-    consulting_memory = load_consulting_memory(job_id)
+    for message in job.get("chat", [])[-HISTORY_MESSAGES:]:
+        content = message["content"][:HISTORY_MESSAGE_CHARS]
+        messages.append(HumanMessage(content=content) if message["role"] == "user" else AIMessage(content=content))
 
-    if consulting_memory is None:
-        return (
-            "I couldn't find the consulting report for this business. "
-            "Please generate a report before starting a consultation."
-        )
+    try:
+        excerpts = vector_store.search(job["job_id"], question, top_k=EVIDENCE_CHUNKS)
+    except Exception:
+        logger.warning("Document search failed for job %s; answering from the report only", job["job_id"])
+        excerpts = []
+    evidence = "\n---\n".join(text for _, text in excerpts) or "(no matching excerpts)"
 
-    # Retrieve supporting evidence from Chroma
-    supporting_context = retrieve_relevant_context(
-        job_id,
-        question,
-        top_k=5
+    messages.append(
+        HumanMessage(content=f"Relevant excerpts from my documents:\n{evidence}\n\nMy question: {question}")
     )
+    response = get_chat_model(temperature=0.5).invoke(messages)
+    return _text(response.content)
 
-    # Extract the important sections
-    analysis = consulting_memory.get("analysis", "")
-    architecture = consulting_memory.get("architecture", "")
-    roi = consulting_memory.get("roi", "")
-    report = consulting_memory.get("report", "")
 
-    # Build the final prompt
-    prompt = f"""
-{CONSULTANT_SYSTEM_PROMPT}
-
-==================================================
-BUSINESS ANALYSIS
-==================================================
-
-{analysis}
-
-==================================================
-SOLUTION ARCHITECTURE
-==================================================
-
-{architecture}
-
-==================================================
-ROI ANALYSIS
-==================================================
-
-{roi}
-
-==================================================
-EXECUTIVE REPORT
-==================================================
-
-{report}
-
-==================================================
-SUPPORTING DOCUMENT EVIDENCE
-==================================================
-
-{supporting_context}
-
-==================================================
-CLIENT QUESTION
-==================================================
-
-{question}
-"""
-
-    response = llm.invoke(prompt)
-
-    content = response.content
-
+def _text(content: Any) -> str:
     if isinstance(content, str):
-        return content
-
+        return content.strip()
     if isinstance(content, list):
-        text = []
-
-        for block in content:
-            if isinstance(block, dict):
-                text.append(block.get("text", ""))
-            else:
-                text.append(str(block))
-
-        return "\n".join(text)
-
+        parts = [block.get("text", "") if isinstance(block, dict) else str(block) for block in content]
+        return "\n".join(part for part in parts if part).strip()
     return str(content)

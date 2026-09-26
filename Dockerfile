@@ -1,12 +1,13 @@
-# Start with a lightweight Python image
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set the working directory inside the container
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-# Copy the requirements file and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your application code
-COPY . .
+# Bake the local embedding model (all-MiniLM-L6-v2, ~80 MB) into the image so the first
+# upload doesn't have to download it.
+RUN python -c "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction; DefaultEmbeddingFunction()(['warm-up'])"
+
+COPY app ./app

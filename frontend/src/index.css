@@ -1,3 +1,101 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --canvas: 7 10 22;
+  --surface: 15 22 41;
+  --raised: 23 32 58;
+  --line: 38 49 80;
+  --fg: 237 240 247;
+  --muted: 168 177 199;
+  --subtle: 122 134 163;
+  color-scheme: dark;
+}
+
+@layer base {
+  body {
+    @apply bg-canvas font-sans text-fg antialiased;
+    background-image:
+      radial-gradient(60rem 30rem at 15% -10%, rgb(139 92 246 / 0.16), transparent 60%),
+      radial-gradient(50rem 28rem at 95% 0%, rgb(59 130 246 / 0.12), transparent 60%);
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+  }
+
+  ::selection {
+    background: rgb(139 92 246 / 0.35);
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-surface/90 shadow-xl shadow-black/20;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-gradient-to-r from-violet-500 to-blue-500 text-white shadow-lg shadow-violet-500/20 hover:brightness-110;
+  }
+
+  .btn-secondary {
+    @apply btn border border-line bg-raised/60 text-fg hover:bg-raised;
+  }
+
+  .btn-ghost {
+    @apply btn px-3 text-muted hover:bg-raised/60 hover:text-fg;
+  }
+
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-[0.14em] text-subtle;
+  }
+
+  .text-gradient {
+    @apply bg-gradient-to-r from-violet-300 via-indigo-300 to-sky-300 bg-clip-text text-transparent;
+  }
+}
+
+/* "Export PDF" prints the report on a light theme, without the app chrome or chat. */
+@media print {
+  :root {
+    --canvas: 255 255 255;
+    --surface: 255 255 255;
+    --raised: 244 246 250;
+    --line: 221 226 235;
+    --fg: 17 24 39;
+    --muted: 55 65 81;
+    --subtle: 100 110 128;
+    color-scheme: light;
+  }
+
+  @page {
+    margin: 14mm;
+  }
+
+  body {
+    background-image: none;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .card {
+    box-shadow: none;
+  }
+
+  .avoid-break {
+    break-inside: avoid;
+  }
+
+  .text-gradient {
+    background: none;
+    color: rgb(var(--fg));
+  }
+}

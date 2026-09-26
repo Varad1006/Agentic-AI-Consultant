@@ -1,234 +1,206 @@
-import { useState, useEffect, useRef } from 'react'
-import ReactMarkdown from 'react-markdown'
+import { useEffect, useState } from 'react'
+import { LoaderCircle, Sparkles, TriangleAlert, WifiOff } from 'lucide-react'
+import AgentPipeline from './components/AgentPipeline'
+import ChatPanel from './components/ChatPanel'
+import DocumentInput from './components/DocumentInput'
+import FailedView from './components/FailedView'
+import Header from './components/Header'
+import ReportView from './components/ReportView'
+import RunningView from './components/RunningView'
+import { API_URL, api } from './lib/api'
+
+const POLL_INTERVAL_MS = 2000
+const RETRY_INTERVAL_MS = 5000
+
+function Notice({ children, tone = 'warning', icon: Icon = TriangleAlert }) {
+  const styles =
+    tone === 'error'
+      ? 'border-red-500/30 bg-red-500/10 text-red-100 [&_svg]:text-red-300'
+      : 'border-amber-400/30 bg-amber-400/10 text-amber-100 [&_svg]:text-amber-300'
+  return (
+    <div role="status" className={`flex gap-3 rounded-xl border p-3.5 text-sm ${styles}`}>
+      <Icon className="mt-0.5 h-4 w-4 shrink-0" />
+      <div>{children}</div>
+    </div>
+  )
+}
+
+function SetupNotice({ health }) {
+  if (!health) return null
+  if (health.error) {
+    return (
+      <Notice tone="error" icon={WifiOff}>
+        The API isn't reachable at <code className="text-xs">{API_URL}</code>. Start the backend (see the README), then refresh.
+      </Notice>
+    )
+  }
+  const { llm, celery } = health.data
+  if (!llm.configured) {
+    return (
+      <Notice>
+        <strong className="font-semibold">GROQ_API_KEY is not set.</strong> Add it to <code className="text-xs">.env</code> and restart the API
+        and worker. Keys are free at console.groq.com.
+      </Notice>
+    )
+  }
+  if (celery !== 'connected') {
+    return <Notice>No Celery worker is running, so analyses will wait in the queue until one starts.</Notice>
+  }
+  return null
+}
+
+function Landing({ health, notice, onSubmit }) {
+  const model = health?.data?.llm?.model?.split('/').pop() ?? 'gpt-oss-120b'
+  return (
+    <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_22rem] lg:gap-10 xl:grid-cols-[minmax(0,1fr)_24rem]">
+      <div className="min-w-0">
+        <p className="inline-flex items-center gap-2 rounded-full border border-line bg-surface/70 px-3 py-1 text-xs font-medium text-muted">
+          <Sparkles className="h-3.5 w-3.5 text-violet-300" />
+          Five specialised agents · {model} on Groq
+        </p>
+        <h1 className="mt-5 text-4xl font-semibold tracking-tight text-fg sm:text-5xl">
+          From documents to <span className="text-gradient">decisions.</span>
+        </h1>
+        <p className="mt-4 max-w-2xl text-base leading-relaxed text-muted">
+          Upload an SOP or process description. A team of AI agents maps your operations, designs an automation
+          blueprint, sizes the ROI and writes an executive-ready report you can question.
+        </p>
+        <div className="mt-6 space-y-3">
+          {notice && <Notice>{notice}</Notice>}
+          <SetupNotice health={health} />
+        </div>
+        <div className="mt-6">
+          <DocumentInput onSubmit={onSubmit} />
+        </div>
+      </div>
+
+      <aside className="card h-fit p-5">
+        <p className="eyebrow">Your consulting team</p>
+        <p className="mt-1 text-sm text-muted">Each agent builds on the previous one's work.</p>
+        <div className="mt-4 -mx-2">
+          <AgentPipeline showStatus={false} />
+        </div>
+        <p className="mt-4 border-t border-line pt-4 text-xs leading-relaxed text-subtle">
+          Then keep the conversation going: the consultant answers follow-up questions using the report and your document.
+        </p>
+      </aside>
+    </div>
+  )
+}
 
 export default function App() {
-  // --- 1. CORE STATE ---
-  const [inputText, setInputText] = useState('')
-  const [selectedFile, setSelectedFile] = useState(null)
-  const [fileObject, setFileObject] = useState(null) // NEW: Holds the file until button is clicked
-  const [jobId, setJobId] = useState(null)
-  const [status, setStatus] = useState('Idle')
-  const [report, setReport] = useState('')
-  
-  // --- 2. CHAT STATE ---
-  const [chatInput, setChatInput] = useState('')
-  const [chatHistory, setChatHistory] = useState([])
-  const [isChatting, setIsChatting] = useState(false)
-  
-  // --- 3. PDF REF ---
-  const reportRef = useRef(null)
+  const [health, setHealth] = useState(null)
+  const [jobId, setJobId] = useState(() => new URLSearchParams(window.location.search).get('job'))
+  const [job, setJob] = useState(null)
+  const [pollError, setPollError] = useState(null)
+  const [notice, setNotice] = useState(null)
 
-  // --- 4. POLLING EFFECT ---
   useEffect(() => {
-    let interval;
-    if (jobId && status === 'Processing') {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch(`http://localhost:8000/api/v1/consult/${jobId}/report`);
-          const data = await res.json();
-          console.log(data);
-          console.log(typeof data.answer);
-          console.log(data.answer);
-          
-          if (res.status === 200 && data.content) {
-            setReport(data.content);
-            setStatus('Completed');
-            clearInterval(interval);
-          }
-        } catch (err) {
-          console.error("Polling error:", err);
-        }
-      }, 3000);
+    let cancelled = false
+    const check = () =>
+      api
+        .health()
+        .then((data) => !cancelled && setHealth({ data }))
+        .catch((err) => !cancelled && setHealth({ error: err.message }))
+    check()
+    const timer = setInterval(check, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
     }
-    return () => clearInterval(interval);
-  }, [jobId, status]);
+  }, [])
 
-  // --- 5. HANDLERS ---
-  
-  // Just "attaches" the file to the UI, doesn't submit yet
-  const handleFileSelection = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setFileObject(file);
-    setSelectedFile(file.name);
-    setInputText(''); // Clear text if they select a file
+  // Keep the job in the URL so a refresh (or a shared link) reopens the same report.
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (jobId) url.searchParams.set('job', jobId)
+    else url.searchParams.delete('job')
+    window.history.replaceState(null, '', url)
+  }, [jobId])
+
+  useEffect(() => {
+    if (!jobId) return undefined
+    let cancelled = false
+    let timer
+    const poll = async () => {
+      try {
+        const data = await api.getJob(jobId)
+        if (cancelled) return
+        setJob(data)
+        setPollError(null)
+        if (data.status === 'queued' || data.status === 'running') timer = setTimeout(poll, POLL_INTERVAL_MS)
+      } catch (err) {
+        if (cancelled) return
+        if (err.status === 404) {
+          setNotice("That analysis couldn't be found. Start a new one below.")
+          setJobId(null)
+          setJob(null)
+          return
+        }
+        setPollError(err.message)
+        timer = setTimeout(poll, RETRY_INTERVAL_MS)
+      }
+    }
+    poll()
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [jobId])
+
+  const startJob = async ({ file, text }) => {
+    const response = file ? await api.uploadDocument(file) : await api.submitText(text)
+    setNotice(null)
+    setJob(null)
+    setJobId(response.job_id)
+    window.scrollTo({ top: 0 })
   }
 
-  // The master button that handles BOTH files and text
-  const handleGenerateReport = async () => {
-    setStatus('Processing');
-    setReport('');
-    setChatHistory([]);
-    
-    // Scenario 1: User attached a file
-    if (fileObject) {
-        const formData = new FormData();
-        formData.append('file', fileObject);
-    
-        try {
-          const res = await fetch('http://localhost:8000/api/v1/upload', {
-            method: 'POST',
-            body: formData
-          });
-          if (!res.ok) throw new Error(`API Error: ${res.status}`);
-          const data = await res.json();
-          setJobId(data.job_id);
-        } catch (err) {
-          setStatus('Failed to upload document');
-        }
-    } 
-    // Scenario 2: User pasted text
-    else if (inputText.trim()) {
-        try {
-          const res = await fetch('http://localhost:8000/api/v1/consult', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ document_text: inputText })
-          });
-          if (!res.ok) throw new Error(`API Error: ${res.status}`);
-          const data = await res.json();
-          setJobId(data.job_id);
-        } catch (err) {
-          setStatus('Failed to connect to API');
-        }
-    }
+  const reset = () => {
+    setJobId(null)
+    setJob(null)
+    setPollError(null)
+    setNotice(null)
   }
 
-  const downloadPDF = async () => {
-    try {
-      const html2pdf = (await import('html2pdf.js')).default;
-      const element = reportRef.current;
-      const opt = {
-        margin:       [0.5, 0.5, 0.5, 0.5],
-        filename:     `Apex_Consulting_Architecture_${jobId.substring(0,6)}.pdf`,
-        image:        { type: 'jpeg', quality: 0.98 },
-        html2canvas:  { scale: 2, useCORS: true },
-        jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
-      };
-      html2pdf().set(opt).from(element).save();
-    } catch (err) {
-      console.error("PDF generation failed:", err);
-      alert("Could not generate PDF. Please ensure html2pdf.js is available.");
-    }
-  }
-  
-  const handleSendMessage = async () => {
-    if (!chatInput.trim() || !jobId) return;
-    
-    const userMsg = chatInput;
-    setChatInput('');
-    setChatHistory(prev => [...prev, { role: 'user', content: userMsg }]);
-    setIsChatting(true);
-
-    try {
-      const res = await fetch(`http://localhost:8000/api/v1/consult/${jobId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: userMsg })
-      });
-      
-      const data = await res.json();
-      setChatHistory(prev => [...prev, { role: 'assistant', content: typeof data.answer === "string" ? data.answer : JSON.stringify(data.answer, null, 2) }]);
-    } catch (err) {
-      setChatHistory(prev => [...prev, { role: 'assistant', content: "Connection error." }]);
-    } finally {
-      setIsChatting(false);
-    }
+  let content
+  if (!jobId) {
+    content = <Landing health={health} notice={notice} onSubmit={startJob} />
+  } else if (!job) {
+    content = (
+      <div className="flex items-center justify-center gap-3 py-24 text-sm text-muted">
+        <LoaderCircle className="h-5 w-5 animate-spin text-violet-300" />
+        Loading analysis…
+      </div>
+    )
+  } else if (job.status === 'queued' || job.status === 'running') {
+    content = <RunningView job={job} onReset={reset} />
+  } else if (job.status === 'failed') {
+    content = <FailedView job={job} onReset={reset} />
+  } else {
+    content = (
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-6 xl:grid-cols-[minmax(0,1fr)_26rem] 2xl:grid-cols-[minmax(0,1fr)_28rem] print:block">
+        <ReportView job={job} model={health?.data?.llm?.model} onReset={reset} />
+        <aside className="no-print min-w-0 xl:sticky xl:top-24 xl:h-[calc(100vh-7.5rem)]">
+          <ChatPanel job={job} onChatUpdate={(chat) => setJob((current) => ({ ...current, chat }))} />
+        </aside>
+      </div>
+    )
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8 font-sans">
-      <div className="max-w-4xl mx-auto space-y-8">
-        <header className="text-center">
-          <h1 className="text-4xl font-bold text-gray-900">Autonomous AI Consultant</h1>
-          <p className="text-gray-500 mt-2">Upload your business processes for instant architectural analysis and ROI.</p>
-        </header>
-
-        <section className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">Upload Document (PDF, DOCX, TXT)</label>
-            <input 
-              type="file" 
-              accept=".pdf,.docx,.txt,.csv"
-              onChange={handleFileSelection}
-              className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-            />
-            {selectedFile && <p className="mt-2 text-sm text-green-600">Attached: {selectedFile}</p>}
-          </div>
-          
-          <div className="relative flex items-center py-4">
-            <div className="flex-grow border-t border-gray-300"></div>
-            <span className="mx-4 text-gray-400 text-sm">OR PASTE TEXT</span>
-            <div className="flex-grow border-t border-gray-300"></div>
-          </div>
-          
-          <textarea
-            className="w-full h-32 p-4 border rounded-md focus:ring-2 focus:ring-blue-500 mb-4"
-            placeholder="Paste your business context or SOPs here..."
-            value={inputText}
-            onChange={(e) => {
-                setInputText(e.target.value);
-                setFileObject(null); // Clear file if they start typing
-                setSelectedFile(null);
-            }}
-          />
-          
-          <button 
-            onClick={handleGenerateReport}
-            disabled={status === 'Processing' || (!inputText.trim() && !fileObject)}
-            className="w-full bg-blue-600 text-white py-3 rounded-md font-semibold hover:bg-blue-700 disabled:bg-blue-300 transition-colors"
-          >
-            {status === 'Processing' ? 'Agents are analyzing...' : 'Generate Architecture Report'}
-          </button>
-        </section>
-
-        {report && (
-          <div className="space-y-8">
-            <div className="flex justify-end">
-              <button 
-                onClick={downloadPDF}
-                className="bg-green-600 text-white px-6 py-2 rounded-md font-semibold hover:bg-green-700 shadow-sm flex items-center gap-2"
-              >
-                Download PDF Report
-              </button>
-            </div>
-
-            <section ref={reportRef} className="bg-white p-10 rounded-lg shadow-sm border border-gray-200 prose prose-blue max-w-none">
-              <ReactMarkdown>{report}</ReactMarkdown>
-            </section>
-
-            <section className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-              <h2 className="text-xl font-bold mb-4">Chat with your Consultant</h2>
-              <div className="h-64 overflow-y-auto mb-4 p-4 border rounded bg-gray-50 flex flex-col gap-3">
-                {chatHistory.map((msg, idx) => (
-                  <div key={idx} className={`p-3 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-100 self-end text-blue-900' : 'bg-white border self-start text-gray-800 shadow-sm'}`}>
-                    <strong>{msg.role === 'user' ? 'You' : 'Consultant'}: </strong> 
-                    <ReactMarkdown className="inline prose-sm">{msg.content}</ReactMarkdown>
-                  </div>
-                ))}
-                {isChatting && <p className="text-gray-500 italic text-sm">Consultant is typing...</p>}
-              </div>
-              <div className="flex gap-2">
-                <input 
-                  type="text" 
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                  className="flex-grow p-3 border rounded focus:ring-2 focus:ring-blue-500"
-                  placeholder="Ask a question..."
-                />
-                <button 
-                  onClick={handleSendMessage}
-                  disabled={isChatting || !chatInput.trim()}
-                  className="bg-blue-600 text-white px-6 py-3 rounded hover:bg-blue-700 disabled:bg-blue-300"
-                >
-                  Send
-                </button>
-              </div>
-            </section>
+    <div className="min-h-screen print:min-h-0">
+      <Header health={health} onHome={reset} />
+      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-12 print:p-0">
+        {pollError && (
+          <div className="no-print mb-6">
+            <Notice tone="error" icon={WifiOff}>
+              Lost connection to the API. Retrying… <span className="text-red-200/70">({pollError})</span>
+            </Notice>
           </div>
         )}
-      </div>
+        {content}
+      </main>
     </div>
   )
 }

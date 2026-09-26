@@ -1,147 +1,117 @@
-import os
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+"""The agents in the consulting pipeline. Each node reads the shared state and returns an update."""
+
+import json
+import logging
+from typing import Any, Type, TypeVar
+
+import groq
+from pydantic import BaseModel
+
+from app import vector_store
+from app.config import settings
+from app.llm import LLMNotConfiguredError, describe_llm_error, structured_model
+from app.prompts import ANALYST_PROMPT, ARCHITECT_PROMPT, REPORT_PROMPT, ROI_PROMPT
+from app.schemas import ArchitecturePlan, CurrentStateAnalysis, FinalReport, ROIEstimate, compute_roi
 from app.state import ConsultantState
-from app.schemas import CurrentStateAnalysis, ArchitecturePlan, ROIMetrics, FinalReportCompilation
-from app.vector_store import retrieve_relevant_context
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-# ✅ FIX: Use correct Google model name
-# Options: "gemini-2.0-flash" (recommended, faster) or "gemini-1.5-pro" (more powerful)
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash",  # Changed from "gemini-3.5-flash"
-    temperature=0
-)
+T = TypeVar("T", bound=BaseModel)
 
-# ... existing code ...
-def planner_node(state: ConsultantState) -> dict:
-    """
-    1. Planner Agent: Acts as a gateway gatekeeper. Validates if the content 
-    is sufficient for operational analysis and sets up the execution context.
-    """
-    document = state.get("client_document_text", "")
-    
-    # Sanitize text to remove null bytes and non-printable characters
-    document = "".join(char for char in document if char.isprintable() or char in "\n\t")
-    document = document.strip()
-    
-    if len(document) < 50:
-        return {"errors": ["Planner Error: Uploaded operational profile text is too brief to generate a comprehensive consulting analysis."]}
-    
-    # Passes text safely along to the next node, truncated to prevent size limits
-    return {"client_document_text": document[:150000]}
+
+def _as_json(model: BaseModel) -> str:
+    return json.dumps(model.model_dump(), indent=1)
+
+
+def _unescape_newlines(value: Any) -> Any:
+    """gpt-oss sometimes double-escapes newlines inside JSON strings, leaving a literal "\\n"."""
+    if isinstance(value, str):
+        return value.replace("\\n", "\n")
+    if isinstance(value, list):
+        return [_unescape_newlines(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _unescape_newlines(item) for key, item in value.items()}
+    return value
+
+
+def _generate(schema: Type[T], prompt: str) -> T:
+    output = structured_model(schema).invoke(prompt)
+    return schema.model_validate(_unescape_newlines(output.model_dump()))
+
+
+def _failure(agent: str, exc: Exception) -> dict:
+    expected = isinstance(exc, (LLMNotConfiguredError, groq.APIError))
+    logger.warning("%s failed: %s", agent, exc, exc_info=not expected)
+    return {"errors": [f"{agent}: {describe_llm_error(exc)}"]}
+
+
+def retriever_node(state: ConsultantState) -> dict:
+    """Context Retriever: selects the parts of the document the analyst should read."""
+    try:
+        context = vector_store.build_document_context(
+            state["job_id"], state["client_document_text"], settings.max_context_chars
+        )
+    except Exception as exc:
+        return _failure("Context Retriever", exc)
+
+    if not context.strip():
+        return {"errors": ["Context Retriever: no document content was found for this job."]}
+    return {"document_context": context}
 
 
 def analyst_node(state: ConsultantState) -> dict:
-    """
-    2. Business Analyst Agent: Queries the vector database for operational bottlenecks.
-    """
-    # Short-circuit if previous node failed
-    if state.get("errors"):
-        return {}
-        
-    job_id = state.get("job_id")
-    search_query = "What is the core business model, what software or tools are used, and what are the specific bottlenecks, pain points, or time-consuming manual processes?"
-    
-    targeted_context = retrieve_relevant_context(job_id, search_query, top_k=6)
-    
-    # THE FIX: Safely catch error strings so they don't break Gemini
-    if not targeted_context or "Error retrieving context" in targeted_context:
-        return {"errors": [f"Analyst Error: Database search failed. Details: {targeted_context}"]}
-
-    analyst_llm = llm.with_structured_output(CurrentStateAnalysis)
-    
-    prompt = (
-        "You are an expert Enterprise Operations Analyst. Analyze the following targeted excerpts "
-        "retrieved from the client's operational documentation. Extract the core business model, "
-        "key tools in the tech stack, and all specific bottlenecks (including numerical time drains).\n\n"
-        f"Retrieved Context:\n{targeted_context}"
-    )
-    
+    """Business Analyst: extracts the business model, tech stack and bottlenecks."""
     try:
-        result = analyst_llm.invoke(prompt)
-        return {"analysis_result": result}
-    except Exception as e:
-        return {"errors": [f"Analyst Node Crash: {str(e)}"]}
+        analysis = _generate(
+            CurrentStateAnalysis,
+            ANALYST_PROMPT.format(context=state["document_context"]),
+        )
+    except Exception as exc:
+        return _failure("Business Analyst", exc)
 
-# ... keep architect_node, roi_calculator_node, and report_generator_node as is ...
+    if not analysis.identified_bottlenecks:
+        return {"errors": ["Business Analyst: no operational bottlenecks were found in the document."]}
+    return {"analysis_result": analysis}
+
 
 def architect_node(state: ConsultantState) -> dict:
-    """
-    3. Automation Expert Agent: Proposes software architectures to eliminate the extracted bottlenecks.
-    """
-    analysis_data = state.get("analysis_result")
-    if not analysis_data:
-        return {"errors": ["Automation Expert Error: Prior Business Analysis metrics are missing."]}
-        
-    architect_llm = llm.with_structured_output(ArchitecturePlan)
-    
-    prompt = (
-        "You are an Automation Expert and Principal Solutions Architect. Review the following structured analysis "
-        "of operational bottlenecks. Propose an automated system integration blueprint, outlining target technology "
-        "solutions, sequential execution steps, and infrastructure requirements.\n\n"
-        f"Structured Analysis Input:\n{analysis_data}"
-    )
-    
+    """Solutions Architect: designs an automation solution for each bottleneck."""
     try:
-        result = architect_llm.invoke(prompt)
-        return {"architecture_plan": result}
-    except Exception as e:
-        return {"errors": [f"Automation Expert Node Crash: {str(e)}"]}
+        plan = _generate(
+            ArchitecturePlan,
+            ARCHITECT_PROMPT.format(analysis=_as_json(state["analysis_result"])),
+        )
+    except Exception as exc:
+        return _failure("Solutions Architect", exc)
+    return {"architecture_plan": plan}
 
 
-def roi_calculator_node(state: ConsultantState) -> dict:
-    """
-    4. ROI Calculator Agent: Evaluates time/money savings based on the analyst's structural metrics.
-    """
-    analysis_data = state.get("analysis_result")
-    if not analysis_data:
-        return {"errors": ["ROI Calculator Error: Analysis metrics missing. Cannot compute financial projections."]}
-        
-    roi_llm = llm.with_structured_output(ROIMetrics)
-    
-    prompt = (
-        "You are a Corporate Financial Controller and ROI Automation Analyst. Review the following business "
-        "bottlenecks and time drains. Calculate realistic financial projections assuming standard engineering "
-        "and operational cost baselines: estimated implementation/development cost (USD), annual hours saved, "
-        "annual monetary savings (USD), payback period in months, and a 3-year ROI percentage.\n\n"
-        f"Bottleneck Metrics Input:\n{analysis_data}"
-    )
-    
+def roi_node(state: ConsultantState) -> dict:
+    """ROI Analyst: estimates cost and savings for the proposed architecture."""
     try:
-        result = roi_llm.invoke(prompt)
-        return {"roi_result": result}
-    except Exception as e:
-        return {"errors": [f"ROI Calculator Node Crash: {str(e)}"]}
+        estimate = _generate(
+            ROIEstimate,
+            ROI_PROMPT.format(
+                analysis=_as_json(state["analysis_result"]),
+                architecture=_as_json(state["architecture_plan"]),
+            ),
+        )
+    except Exception as exc:
+        return _failure("ROI Analyst", exc)
+    return {"roi_result": compute_roi(estimate)}
 
 
-def report_generator_node(state: ConsultantState) -> dict:
-    """
-    5. Report Generator Agent: Synthesizes findings across all downstream nodes 
-    and writes a unified, high-level corporate Executive Summary.
-    """
-    analysis = state.get("analysis_result")
-    architecture = state.get("architecture_plan")
-    roi = state.get("roi_result")
-    
-    if not all([analysis, architecture, roi]):
-        return {"errors": ["Report Generator Error: Incomplete pipeline data. Missing dependencies to generate summary."]}
-        
-    report_llm = llm.with_structured_output(FinalReportCompilation)
-    
-    prompt = (
-        "You are a Chief Report Compiler and Management Consultant. Synthesize the outputs from the Business Analyst, "
-        "Automation Expert, and ROI Calculator agents into a high-level corporate Executive Summary. This summary "
-        "must highlight the strategic business value, core pain points addressed, and a high-conviction case for "
-        "why executing this automation blueprint will maximize profitability.\n\n"
-        f"Analyst Output:\n{analysis}\n\n"
-        f"Architect Output:\n{architecture}\n\n"
-        f"ROI Output:\n{roi}"
-    )
-    
+def report_node(state: ConsultantState) -> dict:
+    """Report Writer: synthesises everything into an executive summary and priority actions."""
     try:
-        result = report_llm.invoke(prompt)
-        return {"final_report": result}
-    except Exception as e:
-        return {"errors": [f"Report Generator Node Crash: {str(e)}"]}
+        report = _generate(
+            FinalReport,
+            REPORT_PROMPT.format(
+                analysis=_as_json(state["analysis_result"]),
+                architecture=_as_json(state["architecture_plan"]),
+                roi=_as_json(state["roi_result"]),
+            ),
+        )
+    except Exception as exc:
+        return _failure("Report Writer", exc)
+    return {"final_report": report}
