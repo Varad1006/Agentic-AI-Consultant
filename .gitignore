@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+.venv-demo/
 .pytest_cache/
 
 # Runtime data (job records, embedded Chroma DB, Redis dumps)

@@ -14,6 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class Settings:
+    demo_mode: bool
+
     # LLM (Groq)
     groq_api_key: str
     groq_model: str
@@ -38,6 +40,7 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(
+        demo_mode=os.getenv("DEMO_MODE", "false").strip().lower() in ("1", "true", "yes"),
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         groq_reasoning_effort=os.getenv("GROQ_REASONING_EFFORT", "medium"),

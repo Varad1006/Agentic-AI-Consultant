@@ -79,6 +79,60 @@ The pipeline stops at the first agent that fails, and the error is shown in the 
 
 4. Open **http://localhost:3001**. The API runs on http://localhost:8000 (interactive docs at `/docs`).
 
+## Free backend demo on Render + Vercel frontend
+
+The repository includes `render.yaml` for a **free Python web service**. This uses
+`DEMO_MODE=true`: the same five-agent LangGraph pipeline runs in one API process,
+one analysis at a time. Redis and Celery workers are not required. Document excerpts
+use keyword search instead of ChromaDB embeddings to fit the free service's memory.
+The existing Docker/Celery setup remains the default when demo mode is off.
+
+1. In [Render](https://dashboard.render.com/), choose **New → Blueprint** and select
+   this repository and the branch containing `render.yaml`.
+2. Confirm that the service plan is **Free**, and enter `GROQ_API_KEY` when prompted.
+   Store the key only on the backend; never put it in a `VITE_` variable.
+3. `CORS_ORIGINS` is preset to `https://agentic-ai-consultant.vercel.app`.
+   Change it if your frontend URL differs (use the origin only, without a trailing
+   slash; multiple origins are comma-separated).
+4. After deployment, open `https://YOUR-SERVICE.onrender.com/api/v1/health`.
+   Expect `execution_mode: "demo"` and `llm.configured: true`.
+   `celery: "disabled"` is expected in this mode.
+5. In your Vercel project's **Settings → Environment Variables**, set
+   `VITE_API_URL=https://YOUR-SERVICE.onrender.com` for Production and redeploy the
+   frontend from the branch containing demo support. Do not append `/api/v1`.
+
+If using **New → Web Service** instead of a Blueprint, use these settings:
+
+| Setting | Value |
+| --- | --- |
+| Repository root directory | Leave blank |
+| Language | Python 3 (not Docker) |
+| Plan | Free |
+| Build command | `pip install -r requirements-demo.txt` |
+| Start command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1` |
+| Environment | Copy the variables in `render.yaml`; enter your own Groq key |
+
+**Demo limits:** one service instance and one Uvicorn worker; simultaneous analysis
+submissions return 429. The supplied settings cap uploads at 2 MB and documents at
+30,000 characters. Reports and document excerpts are temporary: Render free services
+lose local files when they restart, redeploy, or sleep. Interrupted jobs cannot
+resume. Download reports you want to keep. See [Render's free-service limits](https://render.com/docs/free).
+
+To test the demo locally:
+
+```bash
+pip install -r requirements-demo.txt
+DEMO_MODE=true uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Use your `.env` for `GROQ_API_KEY`, and allow your local frontend origin in
+`CORS_ORIGINS`. Demo regression tests can run without Celery, Redis or ChromaDB:
+
+```bash
+pip install pytest httpx
+DEMO_MODE=true CORS_ORIGINS=https://agentic-ai-consultant.vercel.app pytest -q tests/demo_cases.py
+```
+
 ## 🛠 Local development (without Docker)
 
 Requires Python 3.10+, Node 18+ and Redis.

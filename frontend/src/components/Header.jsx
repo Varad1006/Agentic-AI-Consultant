@@ -3,9 +3,9 @@ import Logo from './Logo'
 function healthState(health) {
   if (!health) return { dot: 'bg-subtle animate-pulse', label: 'Checking API…' }
   if (health.error) return { dot: 'bg-red-500', label: 'API offline', title: health.error }
-  const { llm, celery } = health.data
+  const { llm, celery, execution_mode } = health.data
   if (!llm.configured) return { dot: 'bg-amber-400', label: 'Groq key missing' }
-  if (celery !== 'connected') return { dot: 'bg-amber-400', label: 'No worker running' }
+  if (execution_mode !== 'demo' && celery !== 'connected') return { dot: 'bg-amber-400', label: 'No worker running' }
   return { dot: 'bg-emerald-400', label: `${llm.model.split('/').pop()} · Groq` }
 }
 
