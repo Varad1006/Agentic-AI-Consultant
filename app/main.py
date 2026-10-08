@@ -1,20 +1,28 @@
 import logging
+import threading
 import uuid
 from typing import Any, Dict, Optional
 
-from celery.result import AsyncResult
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app import advisor, report, storage, vector_store
-from app.celery_worker import celery_app, run_consulting_job
 from app.config import settings
 from app.documents import DocumentError, extract_text, prepare_text
 from app.llm import describe_llm_error
 
+if settings.demo_mode:
+    from app.runner import run_consulting_job
+else:
+    from celery.result import AsyncResult
+    from app.celery_worker import celery_app, run_consulting_job
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_demo_slot = threading.BoundedSemaphore(1)
+_demo_job_id = None
 
 app = FastAPI(title="Autonomous AI Consultant API", version="2.0.0")
 app.add_middleware(
@@ -38,15 +46,19 @@ class ChatRequest(BaseModel):
 
 @app.get("/api/v1/health")
 def health_check() -> Dict[str, Any]:
-    try:
-        workers = len(celery_app.control.ping(timeout=1.0))
-        celery_status = "connected" if workers else "no_workers"
-    except Exception as exc:
-        logger.warning("Celery ping failed: %s", exc)
-        workers, celery_status = 0, "unreachable"
+    if settings.demo_mode:
+        workers, celery_status = 0, "disabled"
+    else:
+        try:
+            workers = len(celery_app.control.ping(timeout=1.0))
+            celery_status = "connected" if workers else "no_workers"
+        except Exception as exc:
+            logger.warning("Celery ping failed: %s", exc)
+            workers, celery_status = 0, "unreachable"
 
     return {
         "status": "ok",
+        "execution_mode": "demo" if settings.demo_mode else "celery",
         "celery": celery_status,
         "workers": workers,
         "llm": {
@@ -119,6 +131,31 @@ def _start_job(raw_text: str, *, source: str, filename: Optional[str]) -> Dict[s
     except DocumentError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    if settings.demo_mode:
+        if not _demo_slot.acquire(blocking=False):
+            raise HTTPException(429, "The demo is processing another analysis. Please try again shortly.")
+        try:
+            return _create_and_dispatch(text, truncated, source=source, filename=filename)
+        except Exception:
+            _demo_slot.release()
+            raise
+    return _create_and_dispatch(text, truncated, source=source, filename=filename)
+
+
+def _run_demo_job(job_id: str, text: str) -> None:
+    global _demo_job_id
+    try:
+        run_consulting_job(job_id, text)
+    except Exception:
+        logger.exception("Demo analysis failed for job %s", job_id)
+        storage.update_job(job_id, status="failed", stage=None, errors=["The analysis stopped unexpectedly. Please try again."])
+    finally:
+        _demo_job_id = None
+        _demo_slot.release()
+
+
+def _create_and_dispatch(text: str, truncated: bool, *, source: str, filename: Optional[str]) -> Dict[str, Any]:
+    global _demo_job_id
     job_id = str(uuid.uuid4())
     try:
         chunks = vector_store.ingest_document(job_id, text)
@@ -130,10 +167,16 @@ def _start_job(raw_text: str, *, source: str, filename: Optional[str]) -> Dict[s
         job_id, source=source, filename=filename, characters=len(text), truncated=truncated
     )
     try:
-        run_consulting_job.apply_async(args=[job_id, text], task_id=job_id)
+        if settings.demo_mode:
+            _demo_job_id = job_id
+            threading.Thread(target=_run_demo_job, args=(job_id, text), daemon=True).start()
+        else:
+            run_consulting_job.apply_async(args=[job_id, text], task_id=job_id)
     except Exception as exc:
         logger.exception("Failed to queue job %s", job_id)
-        message = "Could not reach the task queue. Is Redis running?"
+        message = "Could not start the analysis. Please try again." if settings.demo_mode else "Could not reach the task queue. Is Redis running?"
+        if settings.demo_mode:
+            _demo_job_id = None
         storage.update_job(job_id, status="failed", errors=[message])
         raise HTTPException(503, message) from exc
 
@@ -148,6 +191,16 @@ def _load_job(job_id: str) -> Dict[str, Any]:
 
     # If the worker died mid-run, the job file never got its final status; ask Celery.
     if job["status"] in ("queued", "running"):
+        if settings.demo_mode:
+            if job_id != _demo_job_id:
+                # The worker may have finished after the first read of this file.
+                job = storage.load_job(job_id)
+                if job["status"] in ("queued", "running"):
+                    job = storage.update_job(
+                        job_id, status="failed", stage=None,
+                        errors=["The demo restarted during this analysis. Please start a new one."],
+                    )
+            return job
         try:
             crashed = AsyncResult(job_id, app=celery_app).state == "FAILURE"
         except Exception:

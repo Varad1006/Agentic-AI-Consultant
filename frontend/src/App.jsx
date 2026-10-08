@@ -30,18 +30,21 @@ function SetupNotice({ health }) {
   if (health.error) {
     return (
       <Notice tone="error" icon={WifiOff}>
-        The API isn't reachable at <code className="text-xs">{API_URL}</code>. Start the backend (see the README), then refresh.
+        The API isn't reachable at <code className="text-xs">{API_URL}</code>. It may be starting up. We'll keep checking; if this continues, check the backend deployment and API URL.
       </Notice>
     )
   }
-  const { llm, celery } = health.data
+  const { llm, celery, execution_mode } = health.data
   if (!llm.configured) {
     return (
       <Notice>
-        <strong className="font-semibold">GROQ_API_KEY is not set.</strong> Add it to <code className="text-xs">.env</code> and restart the API
-        and worker. Keys are free at console.groq.com.
+        <strong className="font-semibold">GROQ_API_KEY is not set.</strong> Add it to the backend's environment variables
+        and restart the backend. Create a key at console.groq.com.
       </Notice>
     )
+  }
+  if (execution_mode === 'demo') {
+    return <Notice>Free demo: one analysis at a time. Download your report before leaving; reports may be cleared when the service restarts.</Notice>
   }
   if (celery !== 'connected') {
     return <Notice>No Celery worker is running, so analyses will wait in the queue until one starts.</Notice>

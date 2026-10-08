@@ -4,8 +4,6 @@ import logging
 from itertools import zip_longest
 from typing import List, Tuple
 
-import chromadb
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import settings
@@ -25,6 +23,8 @@ _embedding_function = None
 
 
 def _get_client():
+    import chromadb
+
     global _client
     if _client is None:
         if settings.chroma_host:
@@ -35,6 +35,8 @@ def _get_client():
 
 
 def _get_embedding_function():
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
     global _embedding_function
     if _embedding_function is None:
         _embedding_function = DefaultEmbeddingFunction()
@@ -50,6 +52,12 @@ def ingest_document(job_id: str, text: str) -> int:
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = splitter.split_text(text)
 
+    if settings.demo_mode:
+        from app import demo_store
+
+        demo_store.save(job_id, chunks)
+        return len(chunks)
+
     collection = _get_client().get_or_create_collection(
         _collection_name(job_id), embedding_function=_get_embedding_function()
     )
@@ -64,6 +72,11 @@ def ingest_document(job_id: str, text: str) -> int:
 
 def search(job_id: str, query: str, top_k: int = 5) -> List[Tuple[int, str]]:
     """Return up to `top_k` (chunk_index, text) pairs, most relevant first."""
+    if settings.demo_mode:
+        from app import demo_store
+
+        return demo_store.search(job_id, query, top_k)
+
     collection = _get_client().get_collection(
         _collection_name(job_id), embedding_function=_get_embedding_function()
     )
